@@ -11,7 +11,7 @@ jobs:
       - name: Get JUCE 8
         run: git clone --depth 1 --branch 8.0.15 https://github.com/juce-framework/JUCE.git JUCE8
       - name: Configure
-        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DHL_JUCE=JUCE8
+        run: cmake -B build -A x64 -DHL_JUCE=JUCE8
       - name: Build
         run: cmake --build build --config Release --target HalfLife_VST3 --parallel
       - name: Check the plugin file
