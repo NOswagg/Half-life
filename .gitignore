@@ -1,0 +1,9 @@
+build*/
+JUCE/
+JUCE7/
+JUCE8/
+jucetools/
+host/
+cmake/
+CMakeLists.juce7.txt
+*.o

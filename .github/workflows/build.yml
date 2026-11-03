@@ -1,0 +1,24 @@
+# Builds the Windows VST3 with Microsoft's compiler (JUCE 8 needs it) on GitHub's Windows machine.
+name: build
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get JUCE 8
+        run: git clone --depth 1 --branch 8.0.15 https://github.com/juce-framework/JUCE.git JUCE8
+      - name: Configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DHL_JUCE=JUCE8
+      - name: Build
+        run: cmake --build build --config Release --target HalfLife_VST3 --parallel
+      - name: Check the plugin file
+        shell: bash
+        run: ls -la "build/HalfLife_artefacts/Release/VST3/Half Life.vst3/Contents/x86_64-win/" && sha256sum "build/HalfLife_artefacts/Release/VST3/Half Life.vst3/Contents/x86_64-win/Half Life.vst3"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HalfLife-VST3-win64
+          path: build/HalfLife_artefacts/Release/VST3/
+          if-no-files-found: error
