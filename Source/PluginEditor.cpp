@@ -944,7 +944,7 @@ void HalfLifeEditor::layoutFace()
     // 01 feed it
     {
         const int x = P + IN, iw = SIDE - 2 * IN; int y = body0 + 12;
-        rSrcHead = { x, y, iw, S (20) }; y += S (24);
+        rSrcHead = {};   // no step heading: the slots start at the top
         const int rowH = 10 + S (18) + S (20) + 2;
         for (int i = 0; i < 4; ++i) { slots[i]->setBounds (x, y, iw, rowH); y += rowH; }
         y += 6;
@@ -1119,10 +1119,8 @@ void HalfLifeEditor::paintFace (juce::Graphics& g)
         g.drawText (name, x, r.getY(), r.getRight() - x, r.getHeight(), juce::Justification::centredLeft);
         if (right.isNotEmpty()) { g.setColour (LABEL); g.setFont (L.font (11.5f, 400)); g.drawText (right, r, juce::Justification::centredRight); }
     };
-    head (rSrcHead, "01", "FEED IT", "drop audio on a row");
     head (rPoolHead, {}, "POOL", {});
     head (rGensHead, {}, "GENERATORS", "made, not loaded");
-    head (rTakeHead, "03", "TAKE IT", {});
     head (rDecideHead, {}, "DECIDE BY", {});
     if (! u) return;
     // interaction, collapsed: label, how many links, the strongest one; a triangle that says it opens
@@ -1154,7 +1152,6 @@ void HalfLifeEditor::paintFace (juce::Graphics& g)
     // 02: the readout over the sound
     {
         const auto o = u->out; int x = rReadout.getX() + 2; const int by = rReadout.getY() + S (32);
-        g.setColour (col::rustHi); g.setFont (L.font (17, 900)); g.drawText ("02", x, by - S (20), S (30), S (20), juce::Justification::bottomLeft); x += S (30);
         const juce::String th = o && o->thalf >= 0 ? juce::String (juce::roundToInt (o->thalf)) + " ms" : U8 ("\xe2\x80\x94");
         g.setColour (col::ink); g.setFont (L.font (32, 900)); g.drawText (th, x, by - S (34), S (200), S (36), juce::Justification::bottomLeft);
         x += (int) juce::GlyphArrangement::getStringWidth (L.font (32, 900), th) + 12;
