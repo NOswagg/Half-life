@@ -130,7 +130,8 @@ void Look::drawButtonBackground (juce::Graphics& g, juce::Button& b, const juce:
         const bool left = b.getProperties()["dir"].toString() == "left"; const float cx = r.getCentreX(), cy = r.getCentreY();
         juce::Path p; if (left) { p.startNewSubPath (cx + 1.5f, cy - 3.5f); p.lineTo (cx - 2, cy); p.lineTo (cx + 1.5f, cy + 3.5f); }
         else { p.startNewSubPath (cx - 1.5f, cy - 3.5f); p.lineTo (cx + 2, cy); p.lineTo (cx - 1.5f, cy + 3.5f); }
-        g.setColour (b.isEnabled() ? (over ? col::ink : col::muted) : col::dim.withAlpha (0.5f)); g.strokePath (p, juce::PathStrokeType (1.4f));
+        p.applyTransform (juce::AffineTransform::scale (TS, TS, cx, cy));   // grows with the text
+        g.setColour (b.isEnabled() ? (over ? col::ink : col::muted) : col::dim.withAlpha (0.5f)); g.strokePath (p, juce::PathStrokeType (1.4f * TS));
         return;
     }
     if (k == "itogOn") { g.setColour (col::bone); g.fillEllipse (r.reduced (0.5f)); g.setColour (juce::Colours::black); g.setFont (font (12, 700).withStyle (juce::Font::italic)); g.drawText (b.getButtonText(), r, juce::Justification::centred); return; }

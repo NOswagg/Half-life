@@ -157,6 +157,64 @@ struct App : JUCEApplication
         check (waitFor ([&] { if (r2->ui()->id != p->ui()->id || ! r2->ui()->out) return false; for (int i = 0; i < 4; ++i) if (r2->ui()->slots[(size_t) i].name != p->ui()->slots[(size_t) i].name) return false; return true; }, 30000), "slot audio survives deleted files (embedded in the project)");
         q = nullptr; r2 = nullptr;
 
+        // presets: save, load into a fresh instance with none of the files, the browser, damaged files
+        {
+            const auto pf = p->presetFolder(); for (auto& f : pf.findChildFiles (File::findFiles, false, "zz test*")) f.deleteFile();
+            p->apvts.getParameter ("volume")->setValueNotifyingHost (p->apvts.getParameter ("volume")->convertTo0to1 (-6));
+            const int st0 = p->statusSerial();
+            p->savePreset ("zz test: one/two");   // illegal characters get cleaned
+            check (waitFor ([&] { return p->statusSerial() != st0 && p->ui()->preset.isNotEmpty(); }, 10000), "preset saves (" + p->statusText() + ")");
+            const auto f = pf.getChildFile (p->ui()->preset + ".hlpreset");
+            check (f.existsAsFile(), "preset file written: " + f.getFileName() + ", " + String (f.getSize() / 1024.0, 1) + " KB");
+            check (! p->ui()->presetEdited, "freshly saved preset is not marked edited");
+            { ZipFile z (f); const auto* e = z.getEntry ("preset.xml"); MemoryBlock mb; if (e) { std::unique_ptr<InputStream> s (z.createStreamForEntry (*e)); s->readIntoMemoryBlock (mb); }
+              const auto x = mb.toString(); int audio = 0; for (int i = 0; i < z.getNumEntries(); ++i) audio += z.getEntry (i)->filename.startsWith ("audio/");
+              check (x.contains ("HalfLifePreset") && ! x.contains ("/tmp/hlpool") && ! x.contains ("<Pool") && ! x.contains ("\"volume\""), "preset holds no file paths, no pool, no volume");
+              int realSlots = 0; for (auto& sl : p->ui()->slots) realSlots += sl.has && ! sl.example;
+              check (audio >= 1 && audio <= realSlots, "slot audio inside the preset (" + String (audio) + " files for " + String (realSlots) + " loaded slots)"); }
+
+            auto r3 = std::make_unique<HalfLifeProcessor>(); r3->prepareToPlay (48000, 512); waitFor ([&] { return r3->ui() && r3->ui()->out; }, 20000);
+            r3->apvts.getParameter ("volume")->setValueNotifyingHost (r3->apvts.getParameter ("volume")->convertTo0to1 (-12));
+            const auto hist0 = r3->ui()->history.size(); const int pool0 = r3->ui()->poolFiles;
+            const auto err = r3->loadPresetFile (f);
+            check (err.isEmpty(), "preset loads on another instance " + err);
+            check (waitFor ([&] { return r3->ui()->preset == p->ui()->preset && r3->ui()->out; }, 30000), "loaded preset shows its name");
+            bool sameSlots = true; for (int i = 0; i < 4; ++i) sameSlots &= r3->ui()->slots[(size_t) i].name == p->ui()->slots[(size_t) i].name;
+            check (sameSlots, "preset brings its slots (the source files are deleted)");
+            { auto a = p->ui()->out, b = r3->ui()->out; double e = 0, sg = 0; const int n = jmin (a->end, b->end); for (int i = 0; i < n; ++i) { const double d = a->L[(size_t) i] - b->L[(size_t) i]; e += d * d; sg += (double) a->L[(size_t) i] * a->L[(size_t) i]; }
+              check (a->end == b->end && 10 * std::log10 (e / sg + 1e-30) < -50, "preset sound matches the original (" + String (10 * std::log10 (e / sg + 1e-30), 1) + " dB difference)"); }
+            check (r3->ui()->history.size() == jmin ((size_t) 16, hist0 + 1) && r3->ui()->poolFiles == pool0, "history keeps going, pool untouched");
+            check (std::abs (r3->apvts.getRawParameterValue ("volume")->load() + 12) < 0.01f, "volume stays where the user had it");
+            check (play (*r3, 0.6) > 0.02f, "loading a preset plays it");
+            auto* dec = r3->apvts.getParameter ("decay");
+            dec->setValueNotifyingHost (jlimit (0.0f, 1.0f, dec->getValue() + 0.2f));
+            check (waitFor ([&] { return r3->ui()->presetEdited || r3->presetIsDirty(); }, 5000), "turning a knob marks the preset edited");
+            // the edited state survives the project
+            { MemoryBlock st; pump (400); r3->getStateInformation (st);
+              auto r4 = std::make_unique<HalfLifeProcessor>(); r4->prepareToPlay (48000, 512); waitFor ([&] { return r4->ui() && r4->ui()->out; }, 20000);
+              r4->setStateInformation (st.getData(), (int) st.getSize());
+              check (waitFor ([&] { return r4->ui()->preset == r3->ui()->preset && r4->ui()->presetEdited; }, 20000), "project remembers the preset name and the edit"); }
+            // damaged files never crash and say why
+            const auto bad1 = pf.getChildFile ("zz test bad1.hlpreset"); bad1.replaceWithText ("not a zip at all");
+            check (r3->loadPresetFile (bad1).isNotEmpty(), "garbage file is refused: " + r3->loadPresetFile (bad1));
+            { MemoryBlock mb; f.loadFileAsData (mb); const auto bad2 = pf.getChildFile ("zz test bad2.hlpreset"); bad2.replaceWithData (mb.getData(), mb.getSize() / 2);
+              check (r3->loadPresetFile (bad2).isNotEmpty(), "half-downloaded file is refused: " + r3->loadPresetFile (bad2));
+              auto* d = (char*) mb.getData(); for (size_t i = 200; i < mb.getSize() - 400; i += 97) d[i] ^= 0x5a;
+              const auto bad3 = pf.getChildFile ("zz test bad3.hlpreset"); bad3.replaceWithData (mb.getData(), mb.getSize());
+              const auto e3 = r3->loadPresetFile (bad3); pump (1500);
+              check (r3->ui() != nullptr, "scrambled file doesn't crash (" + (e3.isEmpty() ? String ("loaded what it could") : e3) + ")"); }
+            check (r3->loadPresetFile (pf.getChildFile ("zz test missing.hlpreset")).isNotEmpty(), "missing file is refused");
+            // the list: by name, with the saved one in it
+            auto all = p->listPresets(); bool found = false; for (auto& x : all) found |= x.name == p->ui()->preset;
+            check (found, "preset list has the saved preset (" + String ((int) all.size()) + " presets)");
+            // the bar and the browser in the window
+            p->mutate(); pump (1200); shot ("9_presetbar");
+            { Button* pb = nullptr; std::function<void (Component*)> fnd = [&] (Component* c) { for (auto* ch : c->getChildren()) { if (auto* b = dynamic_cast<TextButton*> (ch)) if (b->getProperties()["info"].toString().startsWith ("Presets|")) pb = b; fnd (ch); } }; fnd (ed);
+              if (pb) { pb->triggerClick(); pump (700); shot ("9b_presets"); pb->triggerClick(); pump (200); } else check (false, "preset button found"); }
+            r3 = nullptr;
+            for (auto& x : pf.findChildFiles (File::findFiles, false, "zz test*")) x.deleteFile();
+        }
+
         // other views
         findButton (ed, "RESONATOR")->triggerClick(); pump (600); shot ("3_resonator");
         p->apvts.getParameter ("distType")->setValueNotifyingHost (p->apvts.getParameter ("distType")->convertTo0to1 (3));
@@ -171,7 +229,7 @@ struct App : JUCEApplication
         p->prepareToPlay (44100, 256);
         check (waitFor ([&] { return p->ui()->out && std::abs (p->ui()->out->sampleRate - 44100) < 1; }, 30000), "re-renders at a new sample rate");
         // resize
-        ed->setSize (1280, 860); pump (1200); shot ("7_small");
+        ed->setSize (1280, 860); pump (600); p->mutate(); pump (1200); shot ("7_small");
         win->setSize (1700, 1000); ed->setSize (1700, 1000); pump (1500); shot ("8_large");
         win = nullptr; delete ed; p = nullptr;
         std::printf ("\n%s (%d failed)\n", fails ? "FAILURES" : "ALL PASSED", fails);

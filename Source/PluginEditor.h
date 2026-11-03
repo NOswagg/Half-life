@@ -147,6 +147,33 @@ public:
     std::function<void()> onClose;
 };
 
+/* the preset browser: opens under the preset bar. Search, the list (factory, then yours), a name and Save */
+class PresetPanel : public ui::Plate, private juce::ListBoxModel
+{
+public:
+    explicit PresetPanel (HalfLifeProcessor& p);
+    void resized() override;
+    void rescan();                       // reads the presets folder again
+    void showFor (const juce::String& current);
+    std::function<void (const juce::String&)> onError;
+    std::vector<HalfLifeProcessor::PresetRef> all;   // everything, unfiltered (the arrows step through this)
+    juce::String current;
+private:
+    HalfLifeProcessor& proc;
+    std::vector<HalfLifeProcessor::PresetRef> shown;
+    juce::TextEditor search, nameField;
+    juce::ListBox list { "presets", this };
+    juce::TextButton save { "Save" }, loadFile, folder { "Folder" };
+    std::unique_ptr<juce::FileChooser> chooser;
+    void filter();
+    void updateSave();
+    int getNumRows() override { return (int) shown.size(); }
+    void paintListBoxItem (int row, juce::Graphics&, int w, int h, bool selected) override;
+    void listBoxItemClicked (int row, const juce::MouseEvent&) override { pick (row); }
+    void returnKeyPressed (int row) override { pick (row); }
+    void pick (int row);
+};
+
 class HalfLifeEditor : public juce::AudioProcessorEditor, public juce::FileDragAndDropTarget, public juce::DragAndDropContainer,
                        private juce::ChangeListener, private juce::Timer, private juce::OpenGLRenderer
 {
@@ -188,6 +215,12 @@ private:
     juce::Rectangle<int> rLayers, rInter, rBench, rToast, rReadout, rSrcHead, rPoolHead, rGensHead, rTakeHead, rDecideHead, rHintsLabel;
     ui::Plate headPlate, srcPlate, stripPlate { {}, false }, takePlate;
     juce::TextButton interBtn;   // interBtn: the collapsed Interaction line in the header
+    // presets: a small bar, arrow - name - arrow; the name opens the browser
+    juce::TextButton presetPrev, presetNext, presetBtn;
+    PresetPanel presetPanel { proc };
+    void stepPreset (int dir);
+    void showError (const juce::String& e);
+    int readoutEnd = 0; bool shownDirty = false, toastInReadout = false;   // where the readout's text ends (the status line goes to its right)
     void layoutInter();
     void layoutLocks();
     // the info line: what's under the mouse, or the three-step workflow

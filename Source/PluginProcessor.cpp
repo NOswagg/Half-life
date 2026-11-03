@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "BinaryData.h"
 
 using namespace hl;
 
@@ -59,6 +60,7 @@ void HalfLifeProcessor::setStatus (const juce::String& s)
 
 void HalfLifeProcessor::parameterChanged (const juce::String& id, float)
 {
+    if (! suppressRerender.load() && id != "volume") presetDirty = true;   // anything a preset stores, changed by hand
     if (suppressRerender.load() || ! hlp::isRerenderParam (id)) return;
     rerenderAt = juce::Time::getMillisecondCounter() + 140;   // debounced, like the prototype
     abortHi = true;
@@ -609,6 +611,7 @@ void HalfLifeProcessor::publish()
     }
     for (auto& h : engine.history) u->history.push_back ({ h->id, juce::String (h->how), h->out, h == engine.current });
     u->poolInfo = poolInfoText(); u->poolFiles = (int) pool.size(); u->poolUsable = poolUsable();
+    u->preset = presetName; u->presetEdited = presetName.isNotEmpty() && (presetDirty.load() || ! engine.current || engine.current->id != presetEntry);
     std::atomic_store (&uiShared, std::shared_ptr<const UiState> (u));
     sendChangeMessage();
 }
@@ -668,6 +671,7 @@ void HalfLifeProcessor::rebuildCoreXml()
 {
     auto x = std::make_unique<juce::XmlElement> ("Core");
     x->setAttribute ("v", 1); x->setAttribute ("hid", engine.hid); x->setAttribute ("oct", octave.load());
+    if (presetName.isNotEmpty()) { x->setAttribute ("preset", presetName); x->setAttribute ("presetEdited", presetDirty.load() || ! engine.current || engine.current->id != presetEntry); }
     { TOut o; for (auto& c : engine.HNET) o.c (c); x->createNewChildElement ("Net")->addTextElement (o.s); }
     { TOut o; for (auto& r : engine.HROUTE) { o.i (r.a); o.i (r.b); o.d (r.w); o.d (r.sa); o.d (r.sb); } x->createNewChildElement ("Route")->addTextElement (o.s); }
     for (int i = 0; i < 4; ++i)
@@ -716,9 +720,10 @@ void HalfLifeProcessor::rebuildCoreXml()
     coreEl = std::move (x);
 }
 
-void HalfLifeProcessor::restoreCore (const juce::XmlElement& x)
+void HalfLifeProcessor::restoreCore (const juce::XmlElement& x, bool asPreset)
 {
-    engine.hid = x.getIntAttribute ("hid", engine.hid); octave = x.getIntAttribute ("oct", 0);
+    // a preset brings its sound, slots, chaos and locks; it leaves the pool, the history, the entry ids and the octave alone
+    if (! asPreset) { engine.hid = x.getIntAttribute ("hid", engine.hid); octave = x.getIntAttribute ("oct", 0); }
     if (auto* n = x.getChildByName ("Net")) { TIn in (n->getAllSubText()); for (auto& c : engine.HNET) in.c (c); }
     if (auto* n = x.getChildByName ("Route")) { TIn in (n->getAllSubText()); for (auto& r : engine.HROUTE) { r.a = (int) in.i(); r.b = (int) in.i(); r.w = in.d(); r.sa = in.d(); r.sb = in.d(); } }
     for (auto* e : x.getChildWithTagNameIterator ("Slot"))
@@ -753,6 +758,32 @@ void HalfLifeProcessor::restoreCore (const juce::XmlElement& x)
     }
     engine.locks.clear();
     if (auto* n = x.getChildByName ("Locks")) { TIn in (n->getAllSubText()); while (in.p < in.t.size()) engine.locks.insert ((int) in.i()); }
+    if (asPreset)
+    {
+        std::shared_ptr<Entry> e;
+        if (auto* he = x.getChildByName ("Hist"))
+            for (auto* ee : he->getChildWithTagNameIterator ("E"))
+            {
+                auto n = std::make_shared<Entry>(); TIn in (ee->getAllSubText());
+                if (! readGenome (in, n->genome)) continue;
+                e = n; if (ee->getIntAttribute ("id") == he->getIntAttribute ("cur")) break;
+            }
+        if (e)
+        {
+            e->id = ++engine.hid; e->how = "preset";
+            Genome g = e->genome; e->out = engine.render (g);
+            if (e->out)
+            {
+                engine.current = e; engine.history.insert (engine.history.begin(), e);
+                if (engine.history.size() > 16) engine.history.pop_back();
+                publishSound(); audition();
+                return;
+            }
+        }
+        if (engine.rerender()) publishSound();   // no sound in the file: keep the current one, rendered with the preset's settings
+        return;
+    }
+    presetName = x.getStringAttribute ("preset");
     pool.clear(); poolCache.clear();
     if (auto* pe = x.getChildByName ("Pool"))
         for (auto* f : pe->getChildWithTagNameIterator ("F")) { juce::File ff (f->getStringAttribute ("p")); if (ff.existsAsFile()) pool.push_back ({ ff, f->getStringAttribute ("rel"), ff.getFileNameWithoutExtension(), f->getIntAttribute ("st") == 3 ? 3 : 0 }); }
@@ -774,6 +805,7 @@ void HalfLifeProcessor::restoreCore (const juce::XmlElement& x)
         for (auto& e : engine.history) if (e != engine.current) pendingIds.push_back (e->id);
     }
     if (! engine.current) engine.boot(), publishSound();
+    presetEntry = engine.current && ! x.getBoolAttribute ("presetEdited") ? engine.current->id : -1; presetDirty = false;
     for (int id : pendingIds)
         post ([this, id] { for (auto& e : engine.history) if (e->id == id && ! e->out) { Genome g = e->genome; e->out = engine.render (g); } }, false);
 }
@@ -783,6 +815,7 @@ void HalfLifeProcessor::getStateInformation (juce::MemoryBlock& dest)
     auto xml = apvts.copyState().createXml();
     if (! xml) return;
     { const std::lock_guard<std::mutex> l (stateLock); if (coreEl) xml->addChildElement (new juce::XmlElement (*coreEl)); }
+    if (auto* c = xml->getChildByName ("Core")) if (c->hasAttribute ("preset") && presetDirty.load()) c->setAttribute ("presetEdited", true);   // a knob moved after the last render
     copyXmlToBinary (*xml, dest);
 }
 
@@ -800,6 +833,173 @@ void HalfLifeProcessor::setStateInformation (const void* data, int size)
         { const std::lock_guard<std::mutex> l (stateLock); coreEl = std::make_unique<juce::XmlElement> (*core); }
         post ([this, core] { restoreCore (*core); }, false);
     }
+}
+
+/* ================= presets =================
+   A preset is one .hlpreset file: a zip holding preset.xml (the knobs and the sound's genome, slots, chaos, locks)
+   and the slots' audio as FLAC files, so it plays the same on a computer that doesn't have the samples.
+   Not in it: the pool, the history, the master volume, file paths (they would show the sender's folders). */
+namespace
+{
+constexpr juce::int64 kMaxPresetFile = 1536ll << 20, kMaxPresetXml = 64ll << 20, kMaxPresetAudio = 400ll << 20;
+const char* const kPresetExt = ".hlpreset";
+
+bool isFactoryPreset (int i) { return juce::String (BinaryData::originalFilenames[i]).endsWithIgnoreCase (kPresetExt); }
+}
+
+std::vector<HalfLifeProcessor::PresetRef> HalfLifeProcessor::listPresets() const
+{
+    std::vector<PresetRef> out, user;
+    for (int i = 0; i < BinaryData::namedResourceListSize; ++i)
+        if (isFactoryPreset (i)) out.push_back ({ juce::String (BinaryData::originalFilenames[i]).upToLastOccurrenceOf (".", false, false), {}, i });
+    for (const auto& e : juce::RangedDirectoryIterator (presetFolder(), false, juce::String ("*") + kPresetExt, juce::File::findFiles))
+        user.push_back ({ e.getFile().getFileNameWithoutExtension(), e.getFile(), -1 });
+    auto byName = [] (const PresetRef& a, const PresetRef& b) { return a.name.compareNatural (b.name) < 0; };
+    std::sort (out.begin(), out.end(), byName); std::sort (user.begin(), user.end(), byName);
+    out.insert (out.end(), user.begin(), user.end());
+    return out;
+}
+
+void HalfLifeProcessor::savePreset (const juce::String& rawName)
+{
+    auto name = juce::File::createLegalFileName (rawName.trim()).trim();
+    if (name.isEmpty()) name = "Untitled";
+    post ([this, name]
+    {
+        rebuildCoreXml();   // the state as it is right now, audio included
+        const auto f = presetFolder().getChildFile (name + kPresetExt);
+        const bool existed = f.existsAsFile();
+        juce::String err;
+        if (writePreset (f, name, err))
+        {
+            presetName = name; presetEntry = engine.current ? engine.current->id : -1; presetDirty = false;
+            setStatus ((existed ? "Preset replaced" : "Preset saved") + juce::String (juce::CharPointer_UTF8 (" \xc2\xb7 ")) + name);
+        }
+        else setStatus ("Couldn't save the preset: " + err);
+    });
+}
+
+bool HalfLifeProcessor::writePreset (const juce::File& f, const juce::String& name, juce::String& err)
+{
+    std::unique_ptr<juce::XmlElement> core;
+    { const std::lock_guard<std::mutex> l (stateLock); if (coreEl) core = std::make_unique<juce::XmlElement> (*coreEl); }
+    auto params = apvts.copyState().createXml();
+    if (! core || ! params || ! engine.current) { err = "there's no sound yet"; return false; }
+
+    core->deleteAllChildElementsWithTagName ("Pool");
+    core->removeAttribute ("oct"); core->removeAttribute ("preset"); core->removeAttribute ("presetEdited");
+    if (auto* he = core->getChildByName ("Hist"))   // only the current sound
+    {
+        const int cur = he->getIntAttribute ("cur");
+        juce::Array<juce::XmlElement*> drop;
+        for (auto* e : he->getChildWithTagNameIterator ("E")) if (e->getIntAttribute ("id") != cur) drop.add (e);
+        for (auto* e : drop) he->removeChildElement (e, true);
+    }
+    for (auto* p : params->getChildWithTagNameIterator ("PARAM"))
+        if (p->getStringAttribute ("id") == "volume") { params->removeChildElement (p, true); break; }
+
+    // the slots' audio: out of the XML into files of their own, each distinct sound stored once
+    juce::ZipFile::Builder zip;
+    std::map<juce::String, juce::String> stored;   // audio text -> file name
+    int n = 0;
+    for (auto* sl : core->getChildWithTagNameIterator ("Slot"))
+    {
+        sl->setAttribute ("path", ""); sl->setAttribute ("fromPool", false); sl->setAttribute ("poolFile", -1);
+        auto* a = sl->getChildByName ("Audio"); if (! a) continue;
+        const auto text = a->getAllSubText(); a->deleteAllTextElements();
+        auto it = stored.find (text);
+        if (it == stored.end())
+        {
+            juce::MemoryBlock mb; mb.fromBase64Encoding (text);
+            const auto file = "audio/" + juce::String (++n) + (a->getStringAttribute ("fmt") == "f32" ? ".f32" : ".flac");
+            zip.addEntry (new juce::MemoryInputStream (mb, true), 0, file, juce::Time::getCurrentTime());
+            it = stored.emplace (text, file).first;
+        }
+        a->setAttribute ("file", it->second);
+    }
+    juce::XmlElement root ("HalfLifePreset");
+    root.setAttribute ("v", 1); root.setAttribute ("name", name); root.setAttribute ("made", getName());
+    root.addChildElement (params.release()); root.addChildElement (core.release());
+    const auto xml = root.toString();
+    zip.addEntry (new juce::MemoryInputStream (xml.toRawUTF8(), xml.getNumBytesAsUTF8(), true), 9, "preset.xml", juce::Time::getCurrentTime());
+
+    // written next to the target first, so a crash or a full disk never leaves half a preset behind
+    const auto tmp = f.getSiblingFile (f.getFileName() + ".part");
+    {
+        juce::FileOutputStream os (tmp);
+        if (! os.openedOk()) { err = "can't write to " + f.getParentDirectory().getFullPathName(); return false; }
+        os.setPosition (0); os.truncate();
+        if (! zip.writeToStream (os, nullptr)) { os.flush(); tmp.deleteFile(); err = "writing failed (disk full?)"; return false; }
+        os.flush();
+        if (os.getStatus().failed()) { tmp.deleteFile(); err = os.getStatus().getErrorMessage(); return false; }
+    }
+    if (! tmp.moveFileTo (f)) { tmp.deleteFile(); err = "can't replace " + f.getFileName(); return false; }
+    return true;
+}
+
+juce::String HalfLifeProcessor::loadPreset (const PresetRef& p)
+{
+    std::unique_ptr<juce::InputStream> in;
+    if (p.factory >= 0 && p.factory < BinaryData::namedResourceListSize)
+    {
+        int size = 0; const char* data = BinaryData::getNamedResource (BinaryData::namedResourceList[p.factory], size);
+        if (! data) return "the preset is missing";
+        in = std::make_unique<juce::MemoryInputStream> (data, (size_t) size, false);
+    }
+    else
+    {
+        if (! p.file.existsAsFile()) return "the file is gone";
+        if (p.file.getSize() > kMaxPresetFile) return "the file is too big to be a preset";
+        in = p.file.createInputStream();
+        if (! in) return "can't open the file";
+    }
+    juce::ZipFile zip (in.release(), true);
+    auto read = [&zip] (const juce::String& entry, juce::int64 cap, juce::MemoryBlock& mb)
+    {
+        const auto* e = zip.getEntry (entry);
+        if (! e || e->uncompressedSize > cap) return false;
+        std::unique_ptr<juce::InputStream> s (zip.createStreamForEntry (*e));
+        if (! s) return false;
+        mb.reset(); s->readIntoMemoryBlock (mb, (juce::pointer_sized_int) cap);
+        return (juce::int64) mb.getSize() == e->uncompressedSize;
+    };
+    juce::MemoryBlock xmlData;
+    if (! read ("preset.xml", kMaxPresetXml, xmlData)) return "this isn't a Half Life preset (or it's damaged)";
+    auto root = juce::parseXML (xmlData.toString());
+    if (! root || ! root->hasTagName ("HalfLifePreset")) return "this isn't a Half Life preset (or it's damaged)";
+    if (root->getIntAttribute ("v", 1) > 1) return "this preset needs a newer Half Life";
+    auto* params = root->getChildByName (apvts.state.getType());
+    auto* coreX = root->getChildByName ("Core");
+    if (! params || ! coreX) return "the preset is damaged";
+
+    auto core = std::make_shared<juce::XmlElement> (*coreX);
+    juce::int64 total = 0;
+    for (auto* sl : core->getChildWithTagNameIterator ("Slot"))
+        if (auto* a = sl->getChildByName ("Audio"))
+        {
+            const auto file = a->getStringAttribute ("file"); if (file.isEmpty()) continue;
+            juce::MemoryBlock mb;
+            if (! read (file, kMaxPresetAudio, mb) || (total += (juce::int64) mb.getSize()) > kMaxPresetFile) return "the preset's audio is damaged";
+            a->removeAttribute ("file"); a->deleteAllTextElements(); a->addTextElement (mb.toBase64Encoding());
+        }
+
+    // the knobs; the master volume stays where the user has it
+    auto now = apvts.copyState().createXml();
+    juce::XmlElement px (*params);
+    for (auto* q : px.getChildWithTagNameIterator ("PARAM")) if (q->getStringAttribute ("id") == "volume") { px.removeChildElement (q, true); break; }
+    if (now) for (auto* q : now->getChildWithTagNameIterator ("PARAM")) if (q->getStringAttribute ("id") == "volume") { px.addChildElement (new juce::XmlElement (*q)); break; }
+    suppressRerender = true;
+    apvts.replaceState (juce::ValueTree::fromXml (px));
+    suppressRerender = false; rerenderAt = 0;
+
+    const auto name = p.name;   // the file name is the preset's name, so renaming the file renames it
+    post ([this, core, name]
+    {
+        restoreCore (*core, true);
+        presetName = name; presetEntry = engine.current ? engine.current->id : -1; presetDirty = false;
+        setStatus ("Preset" + juce::String (juce::CharPointer_UTF8 (" \xc2\xb7 ")) + name);
+    });
+    return {};
 }
 
 /* ================= audio ================= */

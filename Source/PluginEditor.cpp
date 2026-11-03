@@ -569,6 +569,111 @@ void AboutPanel::paint (juce::Graphics& g)
 
 void AboutPanel::mouseUp (const juce::MouseEvent&) { setVisible (false); if (onClose) onClose(); }
 
+/* ======================= presets ======================= */
+static void styleField (juce::TextEditor& t, const juce::String& hint)
+{
+    t.setFont (Look::get().font (13, 400));
+    t.setColour (juce::TextEditor::backgroundColourId, juce::Colour (246, 242, 236).withAlpha (0.05f));
+    t.setColour (juce::TextEditor::outlineColourId, col::line2()); t.setColour (juce::TextEditor::focusedOutlineColourId, col::line());
+    t.setColour (juce::TextEditor::textColourId, col::ink); t.setColour (juce::TextEditor::highlightColourId, col::rust.withAlpha (0.5f));
+    t.setColour (juce::CaretComponent::caretColourId, col::ink);
+    t.setTextToShowWhenEmpty (hint, col::dim); t.setIndents (S (6), 0); t.setJustification (juce::Justification::centredLeft);
+}
+
+PresetPanel::PresetPanel (HalfLifeProcessor& p) : ui::Plate ("Presets", true), proc (p)
+{
+    setInterceptsMouseClicks (true, true); alpha = 0.96f;
+    styleField (search, "Search"); styleField (nameField, "Name for this sound");
+    search.onTextChange = [this] { filter(); };
+    search.onReturnKey = [this] { if (! shown.empty()) pick (0); };
+    search.onEscapeKey = [this] { setVisible (false); };
+    nameField.onTextChange = [this] { updateSave(); };
+    nameField.onReturnKey = [this] { save.triggerClick(); };
+    list.setColour (juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
+    list.setRowHeight (S (24)); list.setOutlineThickness (0);
+    list.getVerticalScrollBar().setColour (juce::ScrollBar::thumbColourId, col::ink.withAlpha (0.25f));
+    loadFile.setButtonText (juce::String (juce::CharPointer_UTF8 ("Load file\xe2\x80\xa6")));
+    for (auto* b : { &save, &loadFile, &folder }) kind (*b, "ghost");
+    save.onClick = [this]
+    {
+        const auto n = nameField.getText().trim();
+        if (n.isEmpty()) { nameField.grabKeyboardFocus(); return; }
+        proc.savePreset (n);
+    };
+    loadFile.onClick = [this]
+    {
+        chooser = std::make_unique<juce::FileChooser> ("Load a Half Life preset", proc.presetFolder(), "*.hlpreset");
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [this] (const juce::FileChooser& fc)
+        {
+            const auto f = fc.getResult(); if (f == juce::File()) return;
+            const auto err = proc.loadPresetFile (f);
+            if (err.isNotEmpty() && onError) onError (err);
+        });
+    };
+    folder.onClick = [this] { proc.presetFolder().startAsProcess(); };
+    save.setTooltip ("Save the current sound as a preset (its samples go inside the file, so it can be shared)");
+    loadFile.setTooltip ("Load a preset from anywhere, e.g. one someone sent you");
+    folder.setTooltip ("Open the presets folder (Documents / Half Life / Presets)");
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &search, &list, &nameField, &save, &loadFile, &folder }) addAndMakeVisible (c);
+}
+
+void PresetPanel::resized()
+{
+    auto r = getLocalBounds().reduced (S (10)); r.removeFromTop (S (22));
+    search.setBounds (r.removeFromTop (S (26))); r.removeFromTop (S (6));
+    auto bottom = r.removeFromBottom (S (24)); r.removeFromBottom (S (6));
+    auto row2 = r.removeFromBottom (S (26)); r.removeFromBottom (S (8));
+    save.setBounds (row2.removeFromRight (S (70))); row2.removeFromRight (S (6)); nameField.setBounds (row2);
+    folder.setBounds (bottom.removeFromRight (S (64))); bottom.removeFromRight (S (6)); loadFile.setBounds (bottom.removeFromRight (S (86)));
+    list.setBounds (r);
+}
+
+void PresetPanel::rescan() { all = proc.listPresets(); filter(); updateSave(); }
+
+void PresetPanel::showFor (const juce::String& cur)
+{
+    current = cur; nameField.setText (cur, false);
+    rescan(); setVisible (true); toFront (false);
+    search.grabKeyboardFocus();
+}
+
+void PresetPanel::filter()
+{
+    const auto q = search.getText().trim();
+    shown.clear();
+    for (auto& p : all) if (q.isEmpty() || p.name.containsIgnoreCase (q)) shown.push_back (p);
+    list.updateContent(); list.repaint();
+}
+
+void PresetPanel::updateSave()
+{
+    const auto n = juce::File::createLegalFileName (nameField.getText().trim()).trim();
+    bool exists = false; for (auto& p : all) if (p.factory < 0 && p.name.equalsIgnoreCase (n)) exists = true;
+    save.setButtonText (exists ? "Replace" : "Save"); save.setEnabled (n.isNotEmpty());
+}
+
+void PresetPanel::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool)
+{
+    if (row < 0 || row >= (int) shown.size()) return;
+    const auto& p = shown[(size_t) row]; const auto& L = Look::get();
+    const bool cur = p.name == current;
+    if (cur) { g.setColour (col::rust.withAlpha (0.22f)); g.fillRect (0, 0, w, h); g.setColour (col::rustHi); g.fillRect (0, 2, 2, h - 4); }
+    else if (list.isMouseOver (true) && list.getRowContainingPosition (list.getMouseXYRelative().x, list.getMouseXYRelative().y) == row) { g.setColour (col::ink.withAlpha (0.06f)); g.fillRect (0, 0, w, h); }
+    int right = w - S (8);
+    if (p.factory >= 0) { g.setColour (col::dim); g.setFont (L.font (10.5f, 700).withExtraKerningFactor (0.12f)); g.drawText ("FACTORY", 0, 0, right, h, juce::Justification::centredRight); right -= S (64); }
+    g.setColour (cur ? col::ink : col::bone); g.setFont (L.font (13, cur ? 700 : 400));
+    g.drawFittedText (p.name, S (10), 0, right - S (10), h, juce::Justification::centredLeft, 1, 0.85f);
+}
+
+void PresetPanel::pick (int row)
+{
+    if (row < 0 || row >= (int) shown.size()) return;
+    const auto p = shown[(size_t) row];
+    const auto err = proc.loadPreset (p);
+    if (err.isNotEmpty()) { if (onError) onError (p.name + ": " + err); return; }
+    current = p.name; nameField.setText (p.name, false); updateSave(); list.repaint();
+}
+
 /* ======================= the editor ======================= */
 static const juce::Colour LABEL (0xffd2cbc0);
 
@@ -678,7 +783,7 @@ HalfLifeEditor::HalfLifeEditor (HalfLifeProcessor& p) : AudioProcessorEditor (&p
     // links: a tab in the bottom panel
     // interaction: one collapsed line in the header; click it and the links open under it
     kind (interBtn, "clear"); add (interBtn);
-    interBtn.onClick = [this] { interPanel.setVisible (! interPanel.isVisible()); if (interPanel.isVisible()) interPanel.toFront (false); face.repaint(); };
+    interBtn.onClick = [this] { interPanel.setVisible (! interPanel.isVisible()); if (interPanel.isVisible()) { presetPanel.setVisible (false); interPanel.toFront (false); } face.repaint(); };
     add (interPanel); interPanel.setVisible (false); interPanel.alpha = 0.95f; interPanel.title = "Interaction";
     graph.setTooltip ("Who pushes whom, left to right. Solid arcs above: loudness drives a parameter of another source. Dashed arcs below: hits re-strike another's gate.");
     btnAtts.add (new juce::AudioProcessorValueTreeState::ButtonAttachment (proc.apvts, "lockLinks", lockLinks));
@@ -687,6 +792,22 @@ HalfLifeEditor::HalfLifeEditor (HalfLifeProcessor& p) : AudioProcessorEditor (&p
     kind (reroll, "ghost"); reroll.setButtonText ("Reroll"); reroll.onClick = [this] { proc.relink(); };
     for (juce::Component* c : std::initializer_list<juce::Component*> { &graph, &lockLinks, &reroll }) interPanel.addAndMakeVisible (c);
     for (int i = 0; i < 8; ++i) { auto* l = linkRows.add (new juce::Label()); style (*l, 11.5f, 400, col::muted); interPanel.addAndMakeVisible (l); }
+
+    // presets: arrow, the name (opens the browser), arrow
+    presetPrev.getProperties().set ("dir", "left"); kind (presetPrev, "nav"); kind (presetNext, "nav"); kind (presetBtn, "clear");
+    for (auto* b : { &presetPrev, &presetBtn, &presetNext }) add (*b);
+    presetPrev.onClick = [this] { stepPreset (-1); };
+    presetNext.onClick = [this] { stepPreset (1); };
+    presetBtn.onClick = [this]
+    {
+        if (presetPanel.isVisible()) presetPanel.setVisible (false);
+        else { interPanel.setVisible (false); presetPanel.showFor (u ? u->preset : juce::String()); }
+        face.repaint();
+    };
+    add (presetPanel); presetPanel.setVisible (false);
+    presetPanel.onError = [this] (const juce::String& e) { showError (e); };
+    info (presetBtn, "Presets|Click to open the list: search, load, save. A preset carries its samples inside it, so you can send it to someone who doesn't have them.");
+    info (presetPrev, "Previous preset|Loads the one before it in the list."); info (presetNext, "Next preset|Loads the next one in the list.");
 
     // under the hood: an overlay over the working area
     add (hood); hood.setVisible (false); hood.alpha = 0.96f;
@@ -797,11 +918,21 @@ void HalfLifeEditor::layoutFace()
     const int logoW = (int) juce::GlyphArrangement::getStringWidth (Look::get().font (16, 900).withExtraKerningFactor (0.32f), "HALF LIFE") + 4;
     const int hx = P + IN + logoW + 24;
     interBtn.setBounds (hx, P + (HEAD - S (28)) / 2, S (190), S (28));
-    perish.setBounds (W - P - S (150), P, S (150), HEAD);
+    const bool narrow = W < 1400;   // small windows: a narrower Perish, the ? without the word "Hints"
+    perish.setBounds (W - P - S (narrow ? 124 : 150), P, S (narrow ? 124 : 150), HEAD);
     volume->setBounds (perish.getX() - 8 - S (104), P + (HEAD - S (32)) / 2, S (104), S (32));
     infoToggle.setBounds (volume->getX() - S (18) - S (18), P + (HEAD - S (18)) / 2, S (18), S (18));
-    rHintsLabel = { infoToggle.getX() - S (44), P, S (40), HEAD };
-    rToast = { interBtn.getRight() + 18, P, juce::jmax (0, rHintsLabel.getX() - 16 - (interBtn.getRight() + 18)), HEAD };
+    rHintsLabel = narrow ? juce::Rectangle<int> (infoToggle.getX(), P, 0, HEAD) : juce::Rectangle<int> (infoToggle.getX() - S (44), P, S (40), HEAD);
+    {   // the preset bar, right of Interaction: as wide as the header allows, up to a point
+        const int y = P + (HEAD - S (28)) / 2, x0 = interBtn.getRight() + S (12), limit = rHintsLabel.getX() - S (14);
+        const int pw = juce::jlimit (S (100), S (200), limit - x0 - 2 * S (24) - 4);
+        presetPrev.setBounds (x0, y, S (24), S (28));
+        presetBtn.setBounds (presetPrev.getRight() + 2, y, pw, S (28));
+        presetNext.setBounds (presetBtn.getRight() + 2, y, S (24), S (28));
+        presetPanel.setBounds (presetPrev.getX() - 8, P + HEAD + 4, S (330), juce::jmin (S (380), H - P - HEAD - 20 - P));
+    }
+    rToast = { presetNext.getRight() + 18, P, juce::jmax (0, rHintsLabel.getX() - 16 - (presetNext.getRight() + 18)), HEAD };
+    toastInReadout = rToast.getWidth() < S (170);   // no room left in the header: messages go on the readout line
     interPanel.setBounds (hx - 8, P + HEAD + 4, S (560), S (230));
     layoutInter();
 
@@ -858,6 +989,7 @@ void HalfLifeEditor::layoutFace()
         const float kw = iw / 6.0f; const int ky = sy + 12 + bh + 8;
         for (int i = 0; i < 6; ++i) macroKnobs[i]->setBounds (cx + 12 + juce::roundToInt (i * kw), ky, juce::roundToInt (kw), sy + STRIP - 10 - ky);
         rReadout = { cx, body0, cw, S (40) };
+        if (toastInReadout) rToast = { cx, body0 + S (12), cw, S (22) };
         display.setBounds (cx, body0 + S (44), cw, juce::jmax (40, sy - G - (body0 + S (44))));
     }
     // modules
@@ -914,7 +1046,7 @@ void HalfLifeEditor::layoutBench()
         const int used = tab == 7 ? left + 3 * LCOL : left + 16 + count * KW;
         const int room = rBench.getWidth() - used - IN - 24;
         rInfo = room >= 300 ? juce::Rectangle<int> (rBench.getRight() - IN - juce::jmin (S (240), room), rBench.getY() + top, juce::jmin (S (240), room), BENCH - top - 10)
-                            : juce::Rectangle<int> (rToast.getX(), P, rToast.getWidth(), HEAD);
+                            : rToast;
     }
     shapeView.setVisible (tab == 0); shapeView.setBounds (IN, top - 2, left - IN, BENCH - top - 8);
     for (int i = 0; i < hints.size(); ++i) { hints[i]->setVisible (hintTab[(size_t) i] == tab && tab != 0); hints[i]->setBounds (IN, top, left - IN, tab == 2 ? 62 : BENCH - top - 10); }
@@ -1007,6 +1139,18 @@ void HalfLifeEditor::paintFace (juce::Graphics& g)
         const juce::String cnt = n == 0 ? juce::String ("no links") : juce::String (n) + (n == 1 ? " link" : " links");
         g.drawText (cnt, t, juce::Justification::centredLeft);
     }
+    // the preset bar: the name between the arrows, a star when the sound has changed since
+    {
+        const auto r = presetBtn.getBounds(); const bool open = presetPanel.isVisible();
+        g.setColour (col::ink.withAlpha (presetBtn.isMouseOver() || open ? 0.1f : 0.05f)); g.fillRoundedRectangle (r.toFloat(), 3);
+        auto t = r.reduced (S (8), 0);
+        juce::Path tri; const float tx = (float) t.getRight() - 5, ty = (float) t.getCentreY();
+        if (open) tri.addTriangle (tx - 5, ty - 2, tx + 5, ty - 2, tx, ty + 4); else tri.addTriangle (tx - 5, ty - 2, tx + 5, ty - 2, tx, ty + 4);
+        g.setColour (col::muted); g.fillPath (tri); t.removeFromRight (S (14));
+        const bool none = u->preset.isEmpty();
+        g.setColour (none ? LABEL : col::ink); g.setFont (L.font (12.5f, none ? 400 : 700));
+        g.drawFittedText (none ? juce::String ("No preset") : u->preset + (u->presetEdited || proc.presetIsDirty() ? " *" : ""), t, juce::Justification::centredLeft, 1, 0.8f);
+    }
     // 02: the readout over the sound
     {
         const auto o = u->out; int x = rReadout.getX() + 2; const int by = rReadout.getY() + S (32);
@@ -1015,7 +1159,9 @@ void HalfLifeEditor::paintFace (juce::Graphics& g)
         g.setColour (col::ink); g.setFont (L.font (32, 900)); g.drawText (th, x, by - S (34), S (200), S (36), juce::Justification::bottomLeft);
         x += (int) juce::GlyphArrangement::getStringWidth (L.font (32, 900), th) + 12;
         g.setColour (col::muted); g.setFont (L.font (12.5f, 400));
-        g.drawText ("half-life" + DOT + (o ? juce::String (o->len, 2) + " s" : juce::String ("-")) + DOT + (o ? juce::String (o->layers) : juce::String ("-")) + " layers", x, by - S (18), rReadout.getRight() - x, S (16), juce::Justification::bottomLeft);
+        const auto rd = "half-life" + DOT + (o ? juce::String (o->len, 2) + " s" : juce::String ("-")) + DOT + (o ? juce::String (o->layers) : juce::String ("-")) + " layers";
+        g.drawText (rd, x, by - S (18), rReadout.getRight() - x, S (16), juce::Justification::bottomLeft);
+        readoutEnd = x + (int) juce::GlyphArrangement::getStringWidth (L.font (12.5f, 400), rd);
     }
 }
 
@@ -1045,16 +1191,17 @@ void HalfLifeEditor::paintFaceOver (juce::Graphics& g)
     }
     const double age = juce::Time::getMillisecondCounterHiRes() - toastAt;
     const bool toastOn = toast.isNotEmpty() && age < 4000 && rToast.getWidth() > 60;
-    const bool infoInHeader = rInfo.getY() == P;
-    if (! hood.isVisible() && ! (infoInHeader && toastOn)) paintInfo (g);
+    const bool infoInHeader = rInfo == rToast;
+    auto rT = rToast; if (toastInReadout) rT.setLeft (juce::jmax (rT.getX(), readoutEnd + S (18)));   // right of the readout's text
+    if (! hood.isVisible() && ! (infoInHeader && toastOn)) { const auto keep = rInfo; if (infoInHeader) rInfo = rT; paintInfo (g); rInfo = keep; }
     // the status line, or the one-line description, in the header
     if (toastOn)
     {
         const float a = (float) juce::jlimit (0.0, 1.0, (4000 - age) / 400);
         g.setColour (col::muted.withAlpha (a)); g.setFont (L.font (12.5f, 400));
-        g.drawFittedText (toast, rToast, juce::Justification::centredLeft, 1, 0.9f);
+        g.drawFittedText (toast, rT, toastInReadout ? juce::Justification::centredRight : juce::Justification::centredLeft, 1, 0.85f);
     }
-    else if (! (infoInHeader && infoText.isNotEmpty() && (bool) infoToggle.getProperties()["on"]))
+    else if (! toastInReadout && ! (infoInHeader && infoText.isNotEmpty() && (bool) infoToggle.getProperties()["on"]))
     {
         g.setColour (LABEL); g.setFont (L.font (12.5f, 400));
         g.drawText ("an endless percussive engine", rToast, juce::Justification::centredLeft, true);
@@ -1064,7 +1211,10 @@ void HalfLifeEditor::paintFaceOver (juce::Graphics& g)
 void HalfLifeEditor::refresh()
 {
     const bool relayout = ! u || ! proc.ui() || u->layers.size() != proc.ui()->layers.size() || u->links.size() != proc.ui()->links.size() || (u->poolFiles > 0) != (proc.ui()->poolFiles > 0);
+    const auto oldPreset = u ? u->preset : juce::String();
     u = proc.ui(); if (! u) return;
+    if (u->preset != oldPreset && presetPanel.isVisible()) { presetPanel.current = u->preset; presetPanel.rescan(); }
+    face.repaint (presetBtn.getBounds());
     for (int i = 0; i < 4; ++i) slots[i]->update (u->slots[(size_t) i]);
     poolInfo.setText (u->poolFiles > 0 ? juce::String (u->poolFiles) + (u->poolFiles == 1 ? " file" : " files") : juce::String ("no files"), juce::dontSendNotification);
     info (poolInfo, "Sample pool|" + u->poolInfo + (u->poolFiles > 0 ? ". Perish and Fresh draw samples from it." : ""));
@@ -1103,6 +1253,7 @@ void HalfLifeEditor::timerCallback()
     if (well.isMouseOver()) well.repaint();
     updateInfo();
     if (proc.ui() != u) refresh();
+    if (const bool d = proc.presetIsDirty(); d != shownDirty) { shownDirty = d; face.repaint (presetBtn.getBounds()); }
     if (juce::Time::getMillisecondCounterHiRes() - toastAt < 3400) face.repaint (rToast);
     const auto lv = proc.live();
     chaosView.push (lv);   // trails keep growing while the overlay is closed, like the prototype
@@ -1135,8 +1286,29 @@ void HalfLifeEditor::timerCallback()
     gl.triggerRepaint();
 }
 
+void HalfLifeEditor::stepPreset (int dir)
+{
+    presetPanel.rescan();
+    const auto& all = presetPanel.all;
+    if (all.empty()) { showError ("No presets yet. Click the name to save one."); return; }
+    int i = -1; const auto cur = u ? u->preset : juce::String();
+    for (size_t k = 0; k < all.size(); ++k) if (all[k].name == cur) { i = (int) k; break; }
+    const int n = (int) all.size(), next = i < 0 ? (dir > 0 ? 0 : n - 1) : ((i + dir) % n + n) % n;
+    const auto err = proc.loadPreset (all[(size_t) next]);
+    if (err.isNotEmpty()) showError (all[(size_t) next].name + ": " + err);
+    else { presetPanel.current = all[(size_t) next].name; presetPanel.repaint(); }
+}
+
+void HalfLifeEditor::showError (const juce::String& e)
+{
+    toast = e; toastAt = juce::Time::getMillisecondCounterHiRes(); face.repaint();
+}
+
 void HalfLifeEditor::filesDropped (const juce::StringArray& files, int, int)
 {
+    // a dropped preset loads; everything else joins the pool
+    for (auto& f : files)
+        if (f.endsWithIgnoreCase (".hlpreset")) { const auto err = proc.loadPresetFile (juce::File (f)); if (err.isNotEmpty()) showError (err); return; }
     juce::Array<juce::File> fs; for (auto& f : files) fs.add (juce::File (f));
     proc.poolAdd (fs);   // dropped outside a slot: everything joins the pool
 }

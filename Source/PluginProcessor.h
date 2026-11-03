@@ -46,6 +46,7 @@ struct UiState
     std::vector<HistUi> history;
     std::array<double, hl::NROT> rot {};
     juce::String poolInfo; int poolFiles = 0; bool poolUsable = false;
+    juce::String preset; bool presetEdited = false;   // the preset the sound came from ("" = none), and whether it changed since
 };
 
 class HalfLifeProcessor : public juce::AudioProcessor, public juce::ChangeBroadcaster, private juce::Thread, private juce::AudioProcessorValueTreeState::Listener
@@ -95,6 +96,13 @@ public:
     void poolAdd (const juce::Array<juce::File>& filesOrFolders);
     void poolClear();
     juce::File makeDragFile();   // message thread: the current sound as a WAV at the last played note, for dragging out
+    // ---- presets: one .hlpreset file each (a zip: preset.xml + the slots' audio as FLAC) ----
+    struct PresetRef { juce::String name; juce::File file; int factory = -1; };   // factory: index of a built-in preset
+    std::vector<PresetRef> listPresets() const;            // factory first, then Documents/Half Life/Presets, by name
+    juce::File presetFolder() const { return outDir ("Presets"); }
+    void savePreset (const juce::String& name);            // written by the render thread; the status line reports it
+    juce::String loadPreset (const PresetRef& p);          // message thread; returns an error text, or "" when loading started
+    juce::String loadPresetFile (const juce::File& f) { return loadPreset ({ f.getFileNameWithoutExtension(), f, -1 }); }
     void setOctave (int o) { octave = juce::jlimit (-3, 3, o); }
     int getOctave() const { return octave.load(); }
 
@@ -105,6 +113,7 @@ public:
     int getLastNote() const { return lastNote.load(); }
     juce::String statusText() const { const juce::SpinLock::ScopedLockType l (statusLock); return status; }
     int statusSerial() const { return statusN.load(); }
+    bool presetIsDirty() const { return presetDirty.load(); }   // a knob moved since the preset (seen before the next render publishes)
     // the live chaos, for the background and Under the hood: 4 global circuits (x,y,z), 4 slot circuits, 8 hidden values
     struct Live { float h[4][3]; float s[4][3]; float hv[hl::NH]; float g[4]; };
     Live live() const { Live l; const juce::SpinLock::ScopedLockType k (liveLock); l = liveV; return l; }
@@ -179,7 +188,10 @@ private:
     mutable std::mutex stateLock;
     std::array<juce::MemoryBlock, 4> slotFlac; std::array<double, 4> slotFlacRate {}, slotFlacGain {}; std::array<juce::String, 4> slotFlacKey;
     void rebuildCoreXml();
-    void restoreCore (const juce::XmlElement& x);
+    void restoreCore (const juce::XmlElement& x, bool asPreset = false);
+    juce::String presetName; int presetEntry = -1;          // render thread
+    std::atomic<bool> presetDirty { false };                // a sound knob moved since the preset loaded or saved
+    bool writePreset (const juce::File& f, const juce::String& name, juce::String& err);
     juce::File outDir (const juce::String& sub) const;
     void renderHi();
     std::atomic<bool> abortHi { false };

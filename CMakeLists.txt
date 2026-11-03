@@ -21,8 +21,9 @@ juce_add_plugin(HalfLife
     PRODUCT_NAME "Half Life")
 
 juce_generate_juce_header(HalfLife)
+file(GLOB HL_FACTORY_PRESETS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Presets/*.hlpreset)   # factory presets, built into the plugin
 juce_add_binary_data(HalfLifeData SOURCES
-    Resources/Archivo-Regular.ttf Resources/Archivo-Bold.ttf Resources/Archivo-Black.ttf)
+    Resources/Archivo-Regular.ttf Resources/Archivo-Bold.ttf Resources/Archivo-Black.ttf ${HL_FACTORY_PRESETS})
 
 target_sources(HalfLife PRIVATE Source/Dsp.cpp Source/Engine.cpp Source/Params.cpp Source/Ui.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
 target_compile_definitions(HalfLife PUBLIC
