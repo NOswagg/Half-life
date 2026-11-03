@@ -2,7 +2,10 @@
 name: build
 on:
   push:
+    branches: [main]
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   windows:
     runs-on: windows-latest
@@ -22,3 +25,11 @@ jobs:
           name: HalfLife-VST3-win64
           path: build/HalfLife_artefacts/Release/VST3/
           if-no-files-found: error
+      - name: Save the plugin to the private "builds" branch
+        shell: bash
+        run: |
+          mkdir out && cp "build/HalfLife_artefacts/Release/VST3/Half Life.vst3/Contents/x86_64-win/Half Life.vst3" out/HalfLife.vst3
+          cd out && git init -q && git checkout -q -b builds
+          git config user.name ci && git config user.email ci@users.noreply.github.com
+          git add HalfLife.vst3 && git commit -qm "build ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" builds
